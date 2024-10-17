@@ -4,7 +4,7 @@ import { randomBytes } from 'crypto'
 import NodeCache from 'node-cache'
 import { proto } from '../../WAProto'
 import { DEFAULT_CACHE_TTLS, KEY_BUNDLE_TYPE, MIN_PREKEY_COUNT } from '../Defaults'
-import { MessageReceiptType, MessageRelayOptions, MessageUserReceipt, SocketConfig, WACallEvent, WAMessageKey, WAMessageStatus, WAMessageStubType, WAPatchName } from '../Types'
+import { MessageReceiptType, MessageRelayOptions, MessageUserReceipt, MinimalMessage, SocketConfig, WACallEvent, WAMessageKey, WAMessageStatus, WAMessageStubType, WAPatchName } from '../Types'
 import {
 	aesDecryptCTR,
 	aesEncryptGCM,
@@ -741,6 +741,43 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		])
 	}
 
+	const fixZumbie = async (limit = 5) => {
+		try {
+			logger.error("Mensagem bugada detectada, iniciando o procedimento anti trava/recuperação do socket");
+			
+			let attempts = 0;
+			
+			 ev.flush(); ///iniciando limpando os eventos
+			
+			// Vamos forçar a recriação da hash de props para reestabelecer o socket e reconstruir o creds.
+			
+			while (attempts < limit) {
+			authState.creds.lastPropHash = '';
+			ev.emit('creds.update', authState.creds);
+			await delay(1000);
+			// agora vamos recriar o props
+			await fetchProps();
+			await delay(1000);			
+				
+			attempts++; 
+			}
+			//finalizado as tentativas de recuperar o props, vamos forçar uma sincronização
+			
+				const name = 'regular' as WAPatchName
+				await resyncAppState([name], false)
+
+				if (authState.creds.processedHistoryMessages) {
+					delete authState.creds.processedHistoryMessages;
+				}
+			
+
+			ev.flush();
+			
+		} catch (err) {
+			logger.debug('Falha ao consultar o hash');
+		}
+	};
+
 	const handleMessage = async(node: BinaryNode) => {
 		if(shouldIgnoreJid(node.attrs.from!) && node.attrs.from! !== '@s.whatsapp.net') {
 			logger.debug({ key: node.attrs.key }, 'ignored message')
@@ -792,23 +829,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
             if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
                 await retryMutex.mutex(async () => {
                     if (ws.isOpen) {
-							 if (hasLowercaseOrHyphen) {
-							 await sendMessageAck(node);
-							 
-							 authState.creds.lastPropHash ='';	
-							 await fetchProps();						 
-				            
-							 return;						 
-							 
-							
-							 }							
-							else
-							{
-								const encNode = getBinaryNodeChild(node, 'enc')
-								await sendRetryRequest(node, !encNode)
-								
-							}
-			 			
+						const jid = jidNormalizedUser(msg.key.remoteJid!);
+						await sendReceipt(msg.key.remoteJid!, participant!, [msg.key.id!], 'sender');
+                        await sendReceipt(jid, undefined, [msg.key.id!], "hist_sync");					
+						cleanMessage(msg, authState.creds.me!.id);
+						await fixZumbie(2)
 
                     } else {
                         logger.error({ node }, "A conexão está fechada durante a tentativa de recuperação");
@@ -825,6 +850,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                     await sendReceipt(jid, undefined, [msg.key.id!], "hist_sync");
                 }
 				 cleanMessage(msg, authState.creds.me!.id);
+				 await sendMessageAck(node)
+                 await upsertMessage(msg, node.attrs.offline ? "append" : "notify");
+				 if(hasLowercaseOrHyphen)
+				 {
+					await fixZumbie(1);
+				 }
 				
             }	
 
@@ -832,38 +863,19 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         } catch (error) {
                 await retryMutex.mutex(async () => {
 						if (ws.isOpen) {
-						 	
-							if (hasLowercaseOrHyphen) {
-								await sendMessageAck(node);						
-								authState.creds.lastPropHash ='';	
-								await fetchProps();
-								return;							
-								}	
-
-
-							
-							else
-							{
-								const encNode = getBinaryNodeChild(node, 'enc')
-								await sendRetryRequest(node, !encNode)
-								
-							}
+							const jid = jidNormalizedUser(msg.key.remoteJid!);
+							await sendReceipt(msg.key.remoteJid!, participant!, [msg.key.id!], 'sender');
+							await sendReceipt(jid, undefined, [msg.key.id!], "hist_sync");
+							cleanMessage(msg, authState.creds.me!.id);
+							await fixZumbie(2);	
+							await sendMessageAck(node);
                     } else {
                         logger.error({ node }, "A conexão está fechada durante a tentativa de recuperação");
                     }
                 });
             
             logger.error({ error }, "Erro durante o processamento de uma mensagem");
-        } finally {
-            // Garante que upsertMessage sempre seja chamado, mesmo em caso de erro
-			 // Sempre envia o acknowledgment da mensagem, independentemente de erros
-			sendMessageAck(node)
-            await upsertMessage(msg, node.attrs.offline ? "append" : "notify");
-			if (hasLowercaseOrHyphen) {						
-				authState.creds.lastPropHash ='';	
-				await fetchProps();	
-		
-				}	
+			return;	
         }
     }),
 

@@ -2,11 +2,12 @@ import { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto'
 import { PROCESSABLE_HISTORY_TYPES } from '../Defaults'
 import { ALL_WA_PATCH_NAMES, ChatModification, ChatMutation, LTHashState, MessageUpsertType, PresenceData, SocketConfig, WABusinessHoursConfig, WABusinessProfile, WAMediaUpload, WAMessage, WAPatchCreate, WAPatchName, WAPresence, WAPrivacyOnlineValue, WAPrivacyValue, WAReadReceiptsValue } from '../Types'
-import { chatModificationToAppPatch, ChatMutationMap, decodePatches, decodeSyncdSnapshot, encodeSyncdPatch, extractSyncdPatches, generateProfilePicture, getHistoryMsg, newLTHashState, processSyncAction } from '../Utils'
+import { chatModificationToAppPatch, ChatMutationMap, decodePatches, decodeSyncdSnapshot, encodeSyncdPatch, extractSyncdPatches, generateProfilePicture, getHistoryMsg, newLTHashState, processSyncAction, delay } from '../Utils'
 import { makeMutex } from '../Utils/make-mutex'
 import processMessage from '../Utils/process-message'
 import { BinaryNode, getBinaryNodeChild, getBinaryNodeChildren, jidNormalizedUser, reduceBinaryNodeToDictionary, S_WHATSAPP_NET } from '../WABinary'
 import { makeSocket } from './socket'
+import { accessSync } from 'fs'
 
 const MAX_SYNC_ATTEMPTS = 2
 
@@ -834,19 +835,24 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	}
 
 	const upsertMessage = ev.createBufferedFunction(async(msg: WAMessage, type: MessageUpsertType) => {
+		if(msg.messageStubType && msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT )
+			{
+				ev.flush();
+				return;
+			}
 		ev.emit('messages.upsert', { messages: [msg], type })
 
-		if(!!msg.pushName) {
+		if (!msg.pushName) { 
 			let jid = msg.key.fromMe ? authState.creds.me!.id : (msg.key.participant || msg.key.remoteJid)
 			jid = jidNormalizedUser(jid!)
 
 			if(!msg.key.fromMe) {
-				ev.emit('contacts.update', [{ id: jid, notify: msg.pushName, verifiedName: msg.verifiedBizName! }])
+				ev.emit('contacts.update', [{ id: jid, notify: msg.pushName || undefined, verifiedName: msg.verifiedBizName! }])
 			}
 
 			// update our pushname too
-			if(msg.key.fromMe && msg.pushName && authState.creds.me?.name !== msg.pushName) {
-				ev.emit('creds.update', { me: { ...authState.creds.me!, name: msg.pushName } })
+			if(msg.key.fromMe && msg.pushName && authState.creds.me?.name !== msg.pushName|| undefined) {
+				ev.emit('creds.update', { me: { ...authState.creds.me!, name: msg.pushName || undefined } })
 			}
 		}
 
